@@ -1,14 +1,14 @@
 import React, { useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
-  ActivityIndicator, StyleSheet, Animated,
+  ActivityIndicator, StyleSheet,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { StackNavigationProp } from '@react-navigation/stack';
 
 import ScreenLayout from '../components/ScreenLayout';
 import { useCVStore } from '../store/cvStore';
-import { generateSummary } from '../utils/aiSummary';
+import { generateSummary, refineSummary } from '../utils/aiSummary';
 import { theme, sw, sh, ms } from '../constants/theme';
 import { RootStackParamList } from '../types/navigation';
 
@@ -18,20 +18,33 @@ type Phase = 'idle' | 'generating' | 'review' | 'refining' | 'editing';
 
 export default function Step2_Summary() {
   const navigation = useNavigation<Nav>();
-  const { summary, setSummary, personal, workExperience, persistToSQLite } = useCVStore();
+  const {
+    summary, setSummary,
+    personal, workExperience, education, skills,
+    persistToSQLite,
+  } = useCVStore();
 
   const [text, setText] = useState(summary);
   const [phase, setPhase] = useState<Phase>(summary ? 'editing' : 'idle');
   const [refineFeedback, setRefineFeedback] = useState('');
   const [showRefineInput, setShowRefineInput] = useState(false);
 
-  /* ── Generate fresh summary ── */
+  /* ── Generate fresh summary using Anthropic ── */
   const handleGenerate = async () => {
     setPhase('generating');
     setShowRefineInput(false);
     setRefineFeedback('');
     try {
-      const result = await generateSummary(personal, workExperience);
+      // Pass all available store data so Claude can write a specific, rich summary
+      const result = await generateSummary(
+        personal,
+        workExperience,
+        education,
+        [
+          ...(skills?.technical ?? []),
+          ...(skills?.soft ?? []),
+        ],
+      );
       setText(result);
       setPhase('review');
     } catch {
@@ -39,19 +52,17 @@ export default function Step2_Summary() {
     }
   };
 
-  /* ── Refine with user feedback ── */
+  /* ── Refine with user feedback using Anthropic ── */
   const handleRefine = async () => {
     if (!refineFeedback.trim()) return;
     setPhase('refining');
     try {
-      // Pass existing text + feedback so aiSummary can incorporate it.
-      // Extend generateSummary to accept an optional { existing, feedback } param,
-      // or call a separate refineSum mary() util – shown below as a direct fetch pattern.
-      const result = await generateSummaryWithFeedback(
-        personal,
-        workExperience,
+      // Uses refineSummary from aiSummary.ts — Anthropic SDK, same model
+      const result = await refineSummary(
         text,
         refineFeedback,
+        personal,
+        workExperience,
       );
       setText(result);
       setRefineFeedback('');
@@ -87,8 +98,8 @@ export default function Step2_Summary() {
           <Text style={styles.emptyIcon}>✦</Text>
           <Text style={styles.emptyTitle}>Let AI write your summary</Text>
           <Text style={styles.emptyBody}>
-            We'll use your job title and experience to craft a tailored professional
-            summary — or you can write one yourself below.
+            We'll use your job title, experience, education, and skills to craft a
+            tailored professional summary — or you can write one yourself below.
           </Text>
         </View>
       )}
@@ -103,7 +114,7 @@ export default function Step2_Summary() {
           <Text style={styles.loadingSubtext}>
             {phase === 'refining'
               ? 'Incorporating your feedback'
-              : 'Analysing your profile'}
+              : 'Analysing your full profile'}
           </Text>
         </View>
       )}
@@ -179,8 +190,8 @@ export default function Step2_Summary() {
         </View>
       )}
 
-      {/* ─── Manual text area (idle or editing) ─── */}
-      {(phase === 'idle') && (
+      {/* ─── Manual text area (idle) ─── */}
+      {phase === 'idle' && (
         <TextInput
           style={styles.textArea}
           multiline
@@ -193,7 +204,7 @@ export default function Step2_Summary() {
         />
       )}
 
-      {/* ─── AI generate button ─── */}
+      {/* ─── AI generate / regenerate button ─── */}
       {!isLoading && (
         <TouchableOpacity
           style={styles.aiBtn}
@@ -214,62 +225,12 @@ export default function Step2_Summary() {
       )}
       {phase === 'idle' && (
         <Text style={styles.hint}>
-          AI uses your name, job title, and experience to write a tailored summary.
+          AI uses your name, job title, experience, education and skills to write a
+          tailored summary.
         </Text>
       )}
     </ScreenLayout>
   );
-}
-
-/* ─── Refine helper (put in aiSummary.ts or inline here) ─── */
-async function generateSummaryWithFeedback(
-  personal: any,
-  workExperience: any,
-  existingSummary: string,
-  feedback: string,
-): Promise<string> {
-  // Import your API key / base URL from env
-  const OPENAI_BASE = process.env.EXPO_PUBLIC_OPENAI_BASE ?? 'https://api.openai.com/v1';
-  const API_KEY = process.env.EXPO_PUBLIC_OPENAI_KEY ?? '';
-
-  const prompt = `
-You are a professional CV writer. Rewrite the following professional summary based on the user's feedback.
-
-CURRENT SUMMARY:
-"${existingSummary}"
-
-USER FEEDBACK:
-"${feedback}"
-
-PROFILE CONTEXT:
-Name: ${personal?.fullName ?? ''}
-Job title: ${personal?.jobTitle ?? ''}
-Experience: ${
-    Array.isArray(workExperience)
-      ? workExperience.map((w: any) => `${w.title} at ${w.company}`).join(', ')
-      : ''
-  }
-
-Return ONLY the rewritten summary. 2–4 sentences. No quotation marks. No preamble.
-  `.trim();
-
-  const res = await fetch(`${OPENAI_BASE}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: 'gpt-4o-mini',
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 200,
-      temperature: 0.7,
-    }),
-  });
-
-  if (!res.ok) throw new Error('API error');
-  const data = await res.json();
-  return data.choices[0].message.content.trim();
 }
 
 /* ─── Styles ─── */

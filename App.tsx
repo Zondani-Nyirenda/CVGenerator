@@ -8,7 +8,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { View, ActivityIndicator, Text, TouchableOpacity, Alert } from 'react-native';
 
 import RootNavigator from './src/navigation/RootNavigator';
-import { initDB, clearCV } from './src/db/database';
+import { initDB } from './src/db/database';
 import { useCVStore } from './src/store/cvStore';
 
 export default function App() {
@@ -17,7 +17,6 @@ export default function App() {
   const initializationDone = useRef(false);
 
   useEffect(() => {
-    // Prevent double initialization in React Strict Mode
     if (initializationDone.current) return;
 
     async function initialize() {
@@ -28,12 +27,11 @@ export default function App() {
         await initDB();
         console.log('✅ Database initialized');
 
-        // 2. Always wipe previous session data so the app starts fresh
-        await clearCV();
-        console.log('🧹 Previous session data cleared');
-
-        // 3. Reset the in-memory store to defaults too
-        useCVStore.getState().resetCV?.();
+        // 2. Load any existing CV data into the store
+        //    (the chat screen handles fresh starts naturally —
+        //     no need to wipe data so users can resume a session)
+        await useCVStore.getState().loadFromSQLite();
+        console.log('✅ Store loaded from SQLite');
 
         setIsReady(true);
         initializationDone.current = true;
@@ -53,7 +51,7 @@ export default function App() {
     return () => {
       initializationDone.current = false;
     };
-  }, []); // ← empty deps: runs once on mount only
+  }, []);
 
   const handleRetry = async () => {
     setError(null);
@@ -61,8 +59,7 @@ export default function App() {
     initializationDone.current = false;
     try {
       await initDB();
-      await clearCV();
-      useCVStore.getState().resetCV?.();
+      await useCVStore.getState().loadFromSQLite();
       setIsReady(true);
       initializationDone.current = true;
     } catch (err) {

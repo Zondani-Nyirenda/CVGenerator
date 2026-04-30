@@ -1,12 +1,10 @@
 /**
  * utils/aiSummary.ts
  *
- * Dynamic professional summary generation via the Anthropic API.
- * Uses ALL available CV context so the output is specific, not generic.
- * Also exports `refineSummary` for the "Tailor it more" flow in Step2.
+ * Dynamic professional summary generation via the Google Gemini API.
  */
 
-import Anthropic from '@anthropic-ai/sdk';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import { PersonalDetails, WorkExperience } from '../types/cv.types';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -27,30 +25,27 @@ interface GenerateSummaryOptions {
   workExperience?: WorkExperience[];
   education?: Education[];
   skills?: string[] | SkillGroup[];
-  /** Approximate years of experience — computed automatically if omitted */
   yearsOverride?: number;
 }
 
-// ─── Client ────────────────────────────────────────────────────────────────
+// ─── Config ─────────────────────────────────────────────────────────────────
 
-const client = new Anthropic({
-  apiKey: process.env.EXPO_PUBLIC_ANTHROPIC_API_KEY ?? '',
-  dangerouslyAllowBrowser: true,   // required for Expo / React Native environments
-});
+const GEMINI_MODEL = 'gemini-2.5-flash';   // ← Updated model
 
-// ─── Helpers ───────────────────────────────────────────────────────────────
+const genAI = new GoogleGenerativeAI(
+  process.env.EXPO_PUBLIC_GEMINI_API_KEY ?? '',
+);
 
-/** Extract a flat list of skill names from whatever shape the store holds. */
+const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
 function flattenSkills(skills?: string[] | SkillGroup[]): string[] {
   if (!skills || skills.length === 0) return [];
   if (typeof skills[0] === 'string') return skills as string[];
   return (skills as SkillGroup[]).flatMap((g) => g.items ?? []);
 }
 
-/**
- * Estimate total years of experience from the work history.
- * Uses the current year when `endDate` is absent (i.e. current role).
- */
 function estimateYears(workExperience?: WorkExperience[]): number | null {
   if (!workExperience?.length) return null;
 
@@ -58,12 +53,10 @@ function estimateYears(workExperience?: WorkExperience[]): number | null {
   const currentYear = new Date().getFullYear();
 
   for (const job of workExperience) {
-    // Try to parse start / end years from strings like "Jan 2019", "2019", etc.
     const startYear = extractYear(job.startDate) ?? currentYear;
     const endYear = job.current
       ? currentYear
       : (extractYear(job.endDate) ?? currentYear);
-
     totalMonths += Math.max(0, (endYear - startYear) * 12);
   }
 
@@ -77,21 +70,14 @@ function extractYear(dateStr?: string): number | null {
   return match ? parseInt(match[0], 10) : null;
 }
 
-/**
- * Build a rich, concise context block that Claude can reason over.
- * The more fields that are filled in, the more specific the output.
- */
 function buildContext(opts: GenerateSummaryOptions): string {
   const { personal, workExperience = [], education = [], skills } = opts;
-
   const lines: string[] = [];
 
-  // Personal
   if (personal.fullName)  lines.push(`Full name: ${personal.fullName}`);
   if (personal.jobTitle)  lines.push(`Current/target job title: ${personal.jobTitle}`);
   if (personal.city)      lines.push(`Location: ${personal.city}`);
 
-  // Experience
   const years = opts.yearsOverride ?? estimateYears(workExperience);
   if (years !== null)     lines.push(`Total years of experience: ~${years}`);
 
@@ -108,7 +94,6 @@ function buildContext(opts: GenerateSummaryOptions): string {
     lines.push(`Work history:\n${jobLines.map((j) => `  • ${j}`).join('\n')}`);
   }
 
-  // Education
   if (education.length) {
     const eduLines = education.map(
       (e) =>
@@ -117,7 +102,6 @@ function buildContext(opts: GenerateSummaryOptions): string {
     lines.push(`Education:\n${eduLines.map((e) => `  • ${e}`).join('\n')}`);
   }
 
-  // Skills
   const skillList = flattenSkills(skills);
   if (skillList.length) {
     lines.push(`Key skills: ${skillList.slice(0, 12).join(', ')}`);
@@ -126,10 +110,9 @@ function buildContext(opts: GenerateSummaryOptions): string {
   return lines.join('\n');
 }
 
-// ─── Prompt templates ──────────────────────────────────────────────────────
+// ─── System instruction ────────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are an expert CV writer with 15 years of experience helping
-professionals land roles at top companies. You write professional summaries that are:
+const SYSTEM_INSTRUCTION = `You are an expert CV writer with 15 years of experience helping professionals land roles at top companies. You write professional summaries that are:
 - Specific to the individual's background (never generic boilerplate)
 - Written in confident third-person voice
 - 2–4 sentences, 60–100 words
@@ -137,11 +120,8 @@ professionals land roles at top companies. You write professional summaries that
 - Focused on the value the candidate brings, not just what they've done
 Return ONLY the summary text. No preamble, no quotation marks, no labels.`;
 
-// ─── Main export ───────────────────────────────────────────────────────────
+// ─── Main exports ───────────────────────────────────────────────────────────
 
-/**
- * Generate a tailored professional summary from CV data.
- */
 export async function generateSummary(
   personal: PersonalDetails,
   workExperience: WorkExperience[],
@@ -149,30 +129,18 @@ export async function generateSummary(
   skills?: string[] | SkillGroup[],
 ): Promise<string> {
   const context = buildContext({ personal, workExperience, education, skills });
-
-  const prompt = `Using the following candidate profile, write a professional CV summary.\n\n${context}`;
+  const prompt = `${SYSTEM_INSTRUCTION}\n\nUsing the following candidate profile, write a professional CV summary.\n\n${context}`;
 
   try {
-    const message = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 300,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: prompt }],
-    });
-
-    const block = message.content[0];
-    if (block.type === 'text') return block.text.trim();
-    return fallback(personal);
-  } catch (err) {
-    console.warn('[aiSummary] generateSummary error:', err);
+    const result = await model.generateContent(prompt);
+    const text = result.response.text().trim();
+    return text || fallback(personal);
+  } catch (err: any) {
+    console.warn('[aiSummary] generateSummary error:', err?.message || err);
     return fallback(personal);
   }
 }
 
-/**
- * Refine an existing summary based on free-text user feedback.
- * Used by the "Tailor it more → Apply feedback" flow in Step2.
- */
 export async function refineSummary(
   existingSummary: string,
   feedback: string,
@@ -185,8 +153,7 @@ export async function refineSummary(
   const years = estimateYears(workExperience);
   if (years)              contextLines.push(`Years of experience: ~${years}`);
 
-  const prompt = `
-You are refining a professional CV summary based on user feedback.
+  const prompt = `You are refining a professional CV summary based on user feedback.
 
 CURRENT SUMMARY:
 "${existingSummary}"
@@ -197,22 +164,14 @@ USER FEEDBACK:
 CANDIDATE CONTEXT:
 ${contextLines.join('\n')}
 
-Rewrite the summary incorporating the feedback. Keep it 2–4 sentences, third-person,
-confident, and specific. Return ONLY the revised summary text.
-`.trim();
+Rewrite the summary incorporating the feedback. Keep it 2–4 sentences, third-person, confident, and specific. Return ONLY the revised summary text. No preamble, no quotes.`;
 
   try {
-    const message = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 300,
-      messages: [{ role: 'user', content: prompt }],
-    });
-
-    const block = message.content[0];
-    if (block.type === 'text') return block.text.trim();
-    return existingSummary;
-  } catch (err) {
-    console.warn('[aiSummary] refineSummary error:', err);
+    const result = await model.generateContent(prompt);
+    const text = result.response.text().trim();
+    return text || existingSummary;
+  } catch (err: any) {
+    console.warn('[aiSummary] refineSummary error:', err?.message || err);
     return existingSummary;
   }
 }

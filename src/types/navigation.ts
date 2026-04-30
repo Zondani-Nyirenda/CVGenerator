@@ -1,4 +1,6 @@
+ 
 export type RootStackParamList = {
+  Chat: undefined;   // ← New chat entry point
   Step1: undefined;
   Step2: undefined;
   Step3: undefined;
